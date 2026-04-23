@@ -74,19 +74,196 @@ export async function crawlPage(url, options = {}) {
       await page.waitForTimeout(600);
     }
 
-    // ── Mouse simulation ───────────────────────────────────────────
+    // ── Mouse simulation + interaction capture ───────────────────
+    let mouseInteractionsData = null;
     if (mouse) {
-      const steps = 6;
+      // Snapshot transforms before traversal
+      const before = await page.evaluate(() =>
+        Array.from(document.querySelectorAll('*')).slice(0, 2000).map(el => ({
+          tag: el.tagName.toLowerCase(),
+          id: el.id || null,
+          classes: Array.from(el.classList).slice(0, 4).join(' '),
+          transform: window.getComputedStyle(el).transform,
+          background: window.getComputedStyle(el).backgroundImage,
+        }))
+      );
+
+      // Grid traversal — 8×8 for thorough coverage
+      const steps = 8;
       for (let row = 0; row <= steps; row++) {
         for (let col = 0; col <= steps; col++) {
           await page.mouse.move(
             Math.round((col / steps) * width),
             Math.round((row / steps) * height)
           );
-          await page.waitForTimeout(40);
+          await page.waitForTimeout(30);
         }
       }
-      await page.waitForTimeout(400);
+      await page.waitForTimeout(500);
+
+      // Snapshot transforms after traversal
+      const after = await page.evaluate(() =>
+        Array.from(document.querySelectorAll('*')).slice(0, 2000).map(el => ({
+          tag: el.tagName.toLowerCase(),
+          id: el.id || null,
+          classes: Array.from(el.classList).slice(0, 4).join(' '),
+          transform: window.getComputedStyle(el).transform,
+          background: window.getComputedStyle(el).backgroundImage,
+        }))
+      );
+
+      // Diff — find elements whose transform or background changed
+      const changed = [];
+      for (let i = 0; i < Math.min(before.length, after.length); i++) {
+        const b = before[i], a = after[i];
+        if (b.transform !== a.transform || b.background !== a.background) {
+          changed.push({
+            element: `${a.tag}${a.id ? '#' + a.id : ''}${a.classes ? '.' + a.classes.split(' ')[0] : ''}`,
+            transformBefore: b.transform,
+            transformAfter:  a.transform,
+            backgroundChanged: b.background !== a.background,
+          });
+        }
+      }
+
+      // Classify changed elements into mouse interaction patterns
+      const parallaxLayers = [];
+      const spotlightEls   = [];
+      const tiltEls        = [];
+
+      for (const el of changed) {
+        if (el.backgroundChanged) {
+          spotlightEls.push({ element: el.element, selector: el.element, technique: 'background-gradient', radius: null, color: null });
+          continue;
+        }
+        // Parse matrix to detect rotation vs translation
+        const m = el.transformAfter;
+        if (m && m !== 'none') {
+          const vals = m.match(/matrix(?:3d)?\(([^)]+)\)/)?.[1]?.split(',').map(Number);
+          if (vals) {
+            if (vals.length === 16) {
+              // matrix3d — likely tilt/rotation: extract rotateX/Y from matrix elements
+              // matrix3d: [m0..m15], rotateX from vals[6]/vals[10], rotateY from vals[2]/vals[10]
+              const rotXRad = Math.atan2(vals[6], vals[10]);
+              const rotYRad = Math.atan2(-vals[2], Math.sqrt(vals[6]*vals[6] + vals[10]*vals[10]));
+              const maxRotateX = Math.round(Math.abs(rotXRad * 180 / Math.PI) * 10) / 10;
+              const maxRotateY = Math.round(Math.abs(rotYRad * 180 / Math.PI) * 10) / 10;
+              tiltEls.push({
+                element: el.element,
+                selector: el.element,
+                maxRotateX: maxRotateX || null,
+                maxRotateY: maxRotateY || null,
+                perspective: null,  // can't read from computed transform
+              });
+            } else if (vals.length === 6) {
+              // matrix(a,b,c,d,tx,ty) — translation = parallax
+              // Intensity = px moved per full viewport traversal (approx)
+              const txPx = vals[4] ? Math.round(Math.abs(vals[4]) * 10) / 10 : null;
+              const tyPx = vals[5] ? Math.round(Math.abs(vals[5]) * 10) / 10 : null;
+              // Depth: normalise against viewport — larger movement = shallower depth index
+              const depth = tyPx != null ? Math.round((1 - Math.min(tyPx / height, 1)) * 100) / 100 : null;
+              parallaxLayers.push({
+                element: el.element,
+                intensityX: txPx,
+                intensityY: tyPx,
+                direction: (txPx && tyPx) ? 'both' : txPx ? 'x' : 'y',
+                depth,
+              });
+            }
+          }
+        }
+      }
+
+      // Detect cursor follower — element that closely tracks cursor position
+      // Move cursor to a known position, then measure element position offset to estimate lag
+      const cursorFollower = await page.evaluate(() => {
+        const selectors = [
+          '.cursor', '.cursor-dot', '.cursor-ring', '.cursor-follower',
+          '[class*="cursor"]', '[class*="follower"]', '[data-cursor]',
+        ];
+        for (const sel of selectors) {
+          try {
+            const el = document.querySelector(sel);
+            if (!el) continue;
+            const cs = window.getComputedStyle(el);
+            // Cursor followers are typically position:fixed, small, and have pointer-events:none
+            const isFixed     = cs.position === 'fixed';
+            const isSmall     = el.offsetWidth < 80 && el.offsetHeight < 80;
+            const noPointer   = cs.pointerEvents === 'none';
+            if (!isFixed) continue;
+
+            // Estimate lag factor from transition-duration (higher duration = more lag)
+            const transitionDuration = cs.transitionDuration;
+            let lagFactor = null;
+            if (transitionDuration && transitionDuration !== '0s') {
+              const ms = parseFloat(transitionDuration) * (transitionDuration.endsWith('ms') ? 1 : 1000);
+              // Normalise: 0ms=0 lag, 500ms+=1.0 lag
+              lagFactor = Math.min(Math.round((ms / 500) * 100) / 100, 1.0);
+            }
+
+            // Detect style type from size and shape
+            let style = 'custom';
+            if (isSmall && el.offsetWidth <= 12) style = 'dot';
+            else if (isSmall && cs.borderRadius === '50%') style = 'ring';
+
+            return {
+              detected: true,
+              selector: sel,
+              element: el.tagName.toLowerCase() + (el.id ? '#' + el.id : '') + (el.className ? '.' + String(el.className).split(' ')[0] : ''),
+              style,
+              lagFactor,
+              isFixed,
+              size: { width: el.offsetWidth, height: el.offsetHeight },
+            };
+          } catch { /* ignore */ }
+        }
+        return null;
+      });
+
+      // Detect magnetic cursor — estimate pull radius from element bounding box + padding
+      const magneticEls = await page.evaluate(() => {
+        const selectors = ['[data-magnetic]', '[data-cursor-magnetic]', '[class*="magnetic"]'];
+        const found = [];
+        for (const sel of selectors) {
+          try {
+            document.querySelectorAll(sel).forEach(el => {
+              const rect = el.getBoundingClientRect();
+              const cs   = window.getComputedStyle(el);
+              // Pull radius: typically 1.5–2× the element's larger dimension
+              const largerDim  = Math.max(rect.width, rect.height);
+              const pullRadius = largerDim > 0 ? Math.round(largerDim * 1.5) : null;
+              // Pull strength: read from data attribute if present, else default 0.3
+              const pullStrength = el.dataset.magneticStrength
+                ? parseFloat(el.dataset.magneticStrength)
+                : 0.3;
+              found.push({
+                element:  el.tagName.toLowerCase() + (el.id ? '#' + el.id : '') + (el.className ? '.' + String(el.className).split(' ')[0] : ''),
+                selector: sel,
+                pullRadius,
+                pullStrength,
+              });
+            });
+          } catch { /* ignore */ }
+        }
+        return found;
+      });
+
+      mouseInteractionsData = {
+        parallax: parallaxLayers.length > 0
+          ? { detected: true, layers: parallaxLayers }
+          : null,
+        spotlight: spotlightEls.length > 0
+          ? { detected: true, elements: spotlightEls }
+          : null,
+        tilt: tiltEls.length > 0
+          ? { detected: true, elements: tiltEls }
+          : null,
+        cursorFollower: cursorFollower || null,
+        magnetic: magneticEls.length > 0
+          ? { detected: true, elements: magneticEls }
+          : null,
+        changedElements: changed.length,
+      };
     }
 
     // ── Interaction simulation ─────────────────────────────────────
@@ -264,78 +441,141 @@ export async function crawlPage(url, options = {}) {
 
     // ── Framer Motion detection ────────────────────────────────────
     const framerData = await page.evaluate(() => {
-      // Method 1: direct window globals (dev mode)
-      if (window.__framer_importFromPackage ||
-          window.FramerMotion ||
-          window.__FRAMER_MOTION__) {
-        return { detected: true, method: 'window-global' };
-      }
-
-      // Method 2: compiled Next.js / Vite — data-projection-id on motion elements
-      const projectionEls = document.querySelectorAll('[data-projection-id]');
-      if (projectionEls.length > 0) {
-        return { detected: true, method: 'data-projection-id', count: projectionEls.length };
-      }
-
-      // Method 3: framer-motion chunk in script src
       const scripts = Array.from(document.scripts);
-      const hasFramerChunk = scripts.some(s =>
-        s.src && (s.src.includes('framer-motion') || s.src.includes('framer_motion'))
-      );
-      if (hasFramerChunk) {
-        return { detected: true, method: 'script-src' };
+
+      // ── Presence detection (7 methods) ──────────────────────────
+      let detected = false;
+      let method = null;
+
+      if (window.__framer_importFromPackage || window.FramerMotion || window.__FRAMER_MOTION__) {
+        detected = true; method = 'window-global';
+      }
+      if (!detected && document.querySelectorAll('[data-projection-id]').length > 0) {
+        detected = true; method = 'data-projection-id';
+      }
+      if (!detected && scripts.some(s => s.src && (s.src.includes('framer-motion') || s.src.includes('framer_motion')))) {
+        detected = true; method = 'script-src';
+      }
+      if (!detected && window.__NEXT_DATA__) {
+        const str = JSON.stringify(window.__NEXT_DATA__);
+        if (str.includes('framer') || str.includes('motion')) { detected = true; method = 'next-data'; }
+      }
+      if (!detected) {
+        const hasFramerCSS = Array.from(document.styleSheets)
+          .flatMap(sheet => { try { return Array.from(sheet.cssRules); } catch { return []; } })
+          .some(rule => { try { const t = rule.cssText || ''; return t.includes('--framer-') || t.includes('data-framer'); } catch { return false; } });
+        if (hasFramerCSS) { detected = true; method = 'css-vars'; }
+      }
+      if (!detected && document.querySelectorAll('[style*="--framer"], [data-framer-component-type], [data-framer-name]').length > 0) {
+        detected = true; method = 'data-framer-attr';
+      }
+      if (!detected && scripts.some(s => !s.src && (
+        s.textContent.includes('useMotionValue') || s.textContent.includes('AnimatePresence') ||
+        s.textContent.includes('motionValue') || s.textContent.includes('framer-motion')
+      ))) {
+        detected = true; method = 'bundle-content';
       }
 
-      // Method 4: Next.js RSC payload
-      const nextData = window.__NEXT_DATA__;
-      if (nextData) {
-        const str = JSON.stringify(nextData);
-        if (str.includes('framer') || str.includes('motion')) {
-          return { detected: true, method: 'next-data' };
+      if (!detected) return null;
+
+      // ── Deep extraction: motion elements from DOM ────────────────
+      // data-projection-id marks every <motion.X> element in compiled output
+      const projectionEls = Array.from(document.querySelectorAll('[data-projection-id]'));
+
+      const variants = [];
+      const springs  = [];
+
+      for (const el of projectionEls.slice(0, 60)) {
+        const cs   = window.getComputedStyle(el);
+        const tag  = el.tagName.toLowerCase();
+        const id   = el.id || null;
+        const cls  = Array.from(el.classList).slice(0, 4).join(' ');
+        const selector = tag + (id ? `#${id}` : cls ? `.${cls.split(' ')[0]}` : '');
+
+        // Read transition timing from computed style
+        const transition   = cs.transition;
+        const animation    = cs.animation;
+        const opacity      = parseFloat(cs.opacity);
+        const transform    = cs.transform;
+
+        // Read --framer-* CSS custom properties for spring/timing tokens
+        const style = el.style;
+        const springDamping   = style.getPropertyValue('--framer-spring-damping')   || null;
+        const springStiffness = style.getPropertyValue('--framer-spring-stiffness') || null;
+        const springMass      = style.getPropertyValue('--framer-spring-mass')      || null;
+        const duration        = style.getPropertyValue('--framer-duration')         || null;
+        const ease            = style.getPropertyValue('--framer-ease')             || null;
+
+        // Infer initial/animate values from current visible state
+        const hasTranslate = transform && transform !== 'none' && transform !== 'matrix(1, 0, 0, 1, 0, 0)';
+        const isHidden     = opacity < 0.05;
+        const isHidden50   = opacity < 0.5;
+
+        // Only include elements that show animation signals
+        if (!transition || transition === 'none' || transition === 'all 0s ease 0s') continue;
+
+        const variant = {
+          selector,
+          transition: transition || null,
+          animation:  animation  || null,
+          opacity:    cs.opacity,
+          transform:  transform  || null,
+          ease:       ease       || extractEaseFromTransition(transition),
+          duration:   duration   || extractDurationFromTransition(transition),
+          initial: isHidden  ? { opacity: 0, y: 20 }
+                 : hasTranslate ? { opacity: 0, transform }
+                 : null,
+          animate: { opacity: isHidden ? 0 : 1 },
+        };
+        variants.push(variant);
+
+        // Spring detection from --framer- custom properties
+        if (springDamping || springStiffness) {
+          springs.push({
+            selector,
+            damping:   springDamping   ? parseFloat(springDamping)   : null,
+            stiffness: springStiffness ? parseFloat(springStiffness) : null,
+            mass:      springMass      ? parseFloat(springMass)      : null,
+          });
         }
       }
 
-      // Method 5: --framer- CSS custom properties in stylesheets
-      const framerCSSVars = Array.from(document.styleSheets)
-        .flatMap(sheet => {
-          try { return Array.from(sheet.cssRules); } catch { return []; }
-        })
-        .some(rule => {
-          try {
-            const text = rule.cssText || '';
-            return text.includes('--framer-') ||
-                   text.includes('framer-motion') ||
-                   text.includes('data-framer');
-          } catch { return false; }
-        });
-      if (framerCSSVars) {
-        return { detected: true, method: 'css-vars' };
+      // ── whileInView elements: look for viewport-entering animations ──
+      // Elements using IntersectionObserver + Framer typically have
+      // data-framer-appear-id or are inside a [data-framer-component-type]
+      const whileInViewEls = Array.from(document.querySelectorAll(
+        '[data-framer-appear-id], [data-framer-component-type="scroll"] *'
+      )).slice(0, 20);
+      const whileInView = whileInViewEls.map(el => ({
+        selector: el.tagName.toLowerCase() + (el.id ? `#${el.id}` : ''),
+        threshold: 0.2, // Framer default
+      }));
+
+      // Helper functions (must be defined inline for page.evaluate scope)
+      function extractEaseFromTransition(t) {
+        if (!t) return null;
+        const m = t.match(/cubic-bezier\([^)]+\)/);
+        return m ? m[0] : null;
+      }
+      function extractDurationFromTransition(t) {
+        if (!t) return null;
+        const m = t.match(/([\d.]+)s/);
+        return m ? `${parseFloat(m[1]) * 1000}ms` : null;
       }
 
-      // Method 6: data-framer-* attributes on elements
-      const framerInlineEls = document.querySelectorAll(
-        '[style*="--framer"], [data-framer-component-type], [data-framer-name]'
-      );
-      if (framerInlineEls.length > 0) {
-        return { detected: true, method: 'data-framer-attr', count: framerInlineEls.length };
-      }
-
-      // Method 7: inline script bundle content signatures
-      const hasMotionBundle = scripts.some(s => {
-        if (!s.src) {
-          return s.textContent.includes('framer-motion') ||
-                 s.textContent.includes('useMotionValue') ||
-                 s.textContent.includes('AnimatePresence') ||
-                 s.textContent.includes('motionValue') ||
-                 s.textContent.includes('useAnimation');
-        }
-        return s.src.includes('framer');
-      });
-      if (hasMotionBundle) {
-        return { detected: true, method: 'bundle-content' };
-      }
-
-      return null;
+      return {
+        detected,
+        method,
+        variants: variants.slice(0, 40),
+        springs:  springs.slice(0, 20),
+        whileInView: whileInView.slice(0, 20),
+        counts: {
+          projectionElements: projectionEls.length,
+          variants:    variants.length,
+          springs:     springs.length,
+          whileInView: whileInView.length,
+        },
+      };
     });
 
     // ── AOS detection ──────────────────────────────────────────────
@@ -420,12 +660,99 @@ export async function crawlPage(url, options = {}) {
       return null;
     });
 
+
+    // ── CDP Animation domain ───────────────────────────────────────────
+    // Captures ALL animations via Chrome DevTools Protocol — cross-library
+    // fallback that catches what DOM-based detectors miss.
+    let cdpAnimationsData = null;
+    try {
+      const cdpSession = await context.newCDPSession(page);
+      await cdpSession.send('Animation.enable');
+
+      const captured = [];
+
+      cdpSession.on('Animation.animationCreated', (event) => {
+        // event.id is the animation id — fetch details below
+        captured.push({ id: event.id });
+      });
+
+      // Brief settle to collect any animations that fired on load
+      await page.waitForTimeout(400);
+
+      // Fetch full details for each captured animation
+      const detailed = [];
+      for (const { id } of captured.slice(0, 200)) {
+        try {
+          const detail = await cdpSession.send('Animation.getPlaybackRate');
+          const animDetail = await cdpSession.send('Animation.resolveAnimation', { animationId: id });
+          detailed.push({
+            id,
+            playbackRate: detail.playbackRate,
+            ...animDetail,
+          });
+        } catch { /* animation may have finished */ }
+      }
+
+      // Also use getAllAnimations if available (Chrome 116+)
+      let allAnimations = [];
+      try {
+        const result = await page.evaluate(() => {
+          const anims = [];
+          document.getAnimations?.()?.forEach(a => {
+            anims.push({
+              id: a.id || null,
+              name: a.animationName || (a.effect?.target ? 'unnamed' : null),
+              type: a.constructor?.name || 'WebAnimation',
+              playState: a.playState,
+              target: a.effect?.target
+                ? {
+                    tag: a.effect.target.tagName?.toLowerCase(),
+                    id: a.effect.target.id || null,
+                    classes: Array.from(a.effect.target.classList || []).slice(0, 4).join(' '),
+                  }
+                : null,
+              source: {
+                timing: {
+                  duration:   a.effect?.getTiming?.()?.duration ?? null,
+                  delay:      a.effect?.getTiming?.()?.delay ?? null,
+                  easing:     a.effect?.getTiming?.()?.easing ?? null,
+                  fill:       a.effect?.getTiming?.()?.fill ?? null,
+                  iterations: a.effect?.getTiming?.()?.iterations ?? null,
+                  direction:  a.effect?.getTiming?.()?.direction ?? null,
+                },
+                keyframesRule: {
+                  keyframes: a.effect?.getKeyframes?.()?.map(kf => ({
+                    offset: kf.computedOffset,
+                    easing: kf.easing,
+                  })) || [],
+                },
+              },
+            });
+          });
+          return anims;
+        });
+        allAnimations = result;
+      } catch { /* getAnimations not available */ }
+
+      await cdpSession.send('Animation.disable');
+      await cdpSession.detach();
+
+      if (allAnimations.length > 0 || detailed.length > 0) {
+        cdpAnimationsData = {
+          detected: true,
+          animations: allAnimations.length > 0 ? allAnimations : detailed,
+        };
+      }
+    } catch { /* CDP not available or blocked */ }
+
     return {
       ...rawData,
       gsap: gsapData,
       framer: framerData,
       aos: aosData,
       scrollReveal: scrollRevealData,
+      cdpAnimations: cdpAnimationsData,
+      mouseInteractions: mouseInteractionsData,
       simulationFlags: { scroll, mouse, interactions },
     };
 

@@ -12,6 +12,14 @@ import { detectFramerMotion } from './detectors/framer-motion.js';
 import { detectIntersectionObserver } from './detectors/intersection-observer.js';
 import { detectAos } from './detectors/aos.js';
 import { detectScrollReveal } from './detectors/scroll-reveal.js';
+import { detectCdpAnimations } from './detectors/cdp-animations.js';
+import { detectMouseParallax } from './detectors/mouse-parallax.js';
+import { detectMagneticCursor } from './detectors/magnetic-cursor.js';
+import { detectTilt3d } from './detectors/tilt-3d.js';
+import { detectCursorFollower } from './detectors/cursor-follower.js';
+import { detectSpotlight } from './detectors/spotlight.js';
+import { computeFingerprint, buildMotionTokens } from './fingerprint.js';
+import { resolveReducedMotion } from './accessibility.js';
 
 function safeDetect(fn, ...args) {
   try { return fn(...args); } catch { return null; }
@@ -33,6 +41,12 @@ export async function extractMotionLanguage(url, options = {}) {
     intersectionObserver: safeDetect(detectIntersectionObserver, rawData),
     aos:                  safeDetect(detectAos, rawData),
     scrollReveal:         safeDetect(detectScrollReveal, rawData),
+    cdp:                  safeDetect(detectCdpAnimations, rawData),
+    mouseParallax:        safeDetect(detectMouseParallax, rawData),
+    magneticCursor:       safeDetect(detectMagneticCursor, rawData),
+    tilt3d:               safeDetect(detectTilt3d, rawData),
+    cursorFollower:       safeDetect(detectCursorFollower, rawData),
+    spotlight:            safeDetect(detectSpotlight, rawData),
   };
 
   // ── Classify into 15-pattern taxonomy ─────────────────────────────
@@ -40,34 +54,11 @@ export async function extractMotionLanguage(url, options = {}) {
 
   // ── Attach reducedMotion flag to every animation ───────────────────
   for (const anim of animations) {
-    anim.reducedMotion = rawData.reducedMotionSupport
-      ? 'supported'
-      : 'not-present';
+    anim.reducedMotion = resolveReducedMotion(anim, rawData.reducedMotionSupport);
   }
 
-  // ── Compute motion fingerprint ─────────────────────────────────────
-  const patternCounts = {};
-  for (const anim of animations) {
-    patternCounts[anim.pattern] = (patternCounts[anim.pattern] || 0) + 1;
-  }
-
-  const dominantPattern = Object.entries(patternCounts)
-    .sort((a, b) => b[1] - a[1])[0]?.[0] || null;
-
-  const libraries = [];
-  if (detections.gsap?.detected)                              libraries.push('gsap');
-  if (detections.framer?.detected)                           libraries.push('framer-motion');
-  if (detections.aos?.detected)                              libraries.push('aos');
-  if (detections.scrollReveal?.detected)                     libraries.push('scroll-reveal');
-  if (detections.cssKeyframes?.counts?.usedKeyframes > 0)    libraries.push('css');
-  if (detections.cssTransitions?.counts?.uniqueProperties > 0 &&
-      !libraries.includes('css'))                            libraries.push('css');
-
-  const dominantLibrary = libraries[0] || 'css';
-
-  // feel: springy / smooth / snappy / mechanical / mixed
-  const easings = animations.map(a => a.easingName).filter(Boolean);
-  const feel = computeFeel(easings, detections);
+  // ── Compute motion fingerprint (via extracted module) ─────────────
+  const fingerprint = computeFingerprint(animations, detections, rawData);
 
   // ── Assemble the motionSpec object ────────────────────────────────
   const motionSpec = {
@@ -78,84 +69,16 @@ export async function extractMotionLanguage(url, options = {}) {
       elementCount: rawData.elementCount,
       simulationFlags: rawData.simulationFlags,
     },
-    fingerprint: {
-      feel,
-      dominantPattern,
-      dominantLibrary,
-      libraries,
-      scrollLinked: !!(detections.gsap?.scrollTriggers?.length > 0),
-      reducedMotionSupport: rawData.reducedMotionSupport,
-      animationCount: animations.length,
-    },
+    fingerprint,
     animations,
-    tokens: buildMotionTokens(animations, detections),
+    tokens: buildMotionTokens(animations),
     raw: {
       cssKeyframes:    detections.cssKeyframes,
       cssTransitions:  detections.cssTransitions,
       motionVariables: rawData.motionVariables || {},
+      cdp:             detections.cdp,
     },
   };
 
   return motionSpec;
-}
-
-// ── Helpers ────────────────────────────────────────────────────────────────
-
-function computeFeel(easings, detections) {
-  if (!easings.length) return 'unknown';
-
-  const counts = {};
-  for (const e of easings) counts[e] = (counts[e] || 0) + 1;
-
-  const springLike = (counts['spring-like'] || 0) +
-    (counts['spring-overshoot'] || 0) +
-    (counts['spring-bouncy'] || 0);
-  const smooth = (counts['expressive-decelerate'] || 0) +
-    (counts['smooth-decelerate'] || 0) +
-    (counts['expo-out'] || 0) +
-    (counts['material-decelerate'] || 0);
-  const snappy = (counts['snappy'] || 0) +
-    (counts['ease-in-custom'] || 0);
-  const mechanical = (counts['linear'] || 0) +
-    (counts['ease-in-out'] || 0);
-
-  const total = easings.length;
-  if (springLike / total > 0.4) return 'springy';
-  if (smooth / total > 0.4)     return 'smooth';
-  if (snappy / total > 0.3)     return 'snappy';
-  if (mechanical / total > 0.4) return 'mechanical';
-  return 'mixed';
-}
-
-function buildMotionTokens(animations, detections) {
-  const durations = new Map();
-  const easings   = new Map();
-
-  for (const anim of animations) {
-    if (anim.duration) {
-      const key = `duration-${anim.durationBucket || 'md'}`;
-      if (!durations.has(key)) {
-        durations.set(key, {
-          name:   key,
-          value:  `${Math.round(anim.duration)}ms`,
-          bucket: anim.durationBucket,
-        });
-      }
-    }
-    if (anim.easing && anim.easingName) {
-      const key = `easing-${anim.easingName}`;
-      if (!easings.has(key)) {
-        easings.set(key, {
-          name:      key,
-          value:     anim.easing,
-          humanName: anim.easingName,
-        });
-      }
-    }
-  }
-
-  return {
-    durations: [...durations.values()],
-    easings:   [...easings.values()],
-  };
 }

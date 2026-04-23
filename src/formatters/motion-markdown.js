@@ -2,6 +2,7 @@
 // Designer-readable. No code knowledge required.
 
 import { bucketDuration } from '../utils/easing-names.js';
+import { figmaDurationTokenName, figmaEasingTokenName } from '../utils/figma-token-schema.js';
 
 export function formatMotionMarkdown(motionSpec) {
   const { meta, fingerprint, animations, tokens } = motionSpec;
@@ -62,14 +63,18 @@ export function formatMotionMarkdown(motionSpec) {
   // ── Animation Inventory ──────────────────────────────────────────
   lines.push('## Animation Inventory');
   lines.push('');
-  lines.push('| ID | Pattern | Source | Duration | Easing | Reduced Motion |');
-  lines.push('|----|---------|--------|----------|--------|----------------|');
+  lines.push('| ID | Pattern | Source | Duration | Figma Duration Token | Easing | Figma Easing Token | Reduced Motion |');
+  lines.push('|----|---------|--------|----------|----------------------|--------|--------------------|----------------|');
 
   for (const anim of animations) {
-    const duration = anim.duration ? `${Math.round(anim.duration)}ms` : '—';
-    const easing   = anim.easingName || anim.easing || '—';
-    const rm       = anim.reducedMotion === 'supported' ? '✅' : '⚠️ missing';
-    lines.push(`| \`${anim.id}\` | ${anim.pattern} | ${anim.source} | ${duration} | ${easing} | ${rm} |`);
+    const duration    = anim.duration ? `${Math.round(anim.duration)}ms` : '—';
+    const easing      = anim.easingName || anim.easing || '—';
+    const rm          = anim.reducedMotion === 'supported' ? '✅'
+                      : anim.reducedMotion === 'fade-only' ? '☑️ fade-only'
+                      : '⚠️ missing';
+    const durToken    = figmaDurationTokenName(anim);
+    const easingToken = figmaEasingTokenName(anim);
+    lines.push(`| \`${anim.id}\` | ${anim.pattern} | ${anim.source} | ${duration} | \`${durToken}\` | ${easing} | \`${easingToken}\` | ${rm} |`);
   }
   lines.push('');
 

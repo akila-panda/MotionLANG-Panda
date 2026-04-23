@@ -16,6 +16,17 @@ import { formatMcp } from '../src/formatters/motion-mcp.js';
 import { scoreMotionSpec } from '../src/score.js';
 import { compareMotionSpecs } from '../src/compare.js';
 
+// ── mcp subcommand ─────────────────────────────────────────────────────────
+program
+  .command('mcp')
+  .description('Start the MCP stdio server for AI agent integration')
+  .option('--dir <path>', 'Directory containing motion spec output files', './motion-spec-output')
+  .action(async (opts) => {
+    const { startMcpServer } = await import('../src/mcp/server.js');
+    await startMcpServer(opts.dir);
+  });
+
+// ── main crawl command ─────────────────────────────────────────────────────
 program
   .name('motionlang')
   .description('Extract the complete motion language from any website')
@@ -52,7 +63,7 @@ program
       spinner.text = 'Crawling page...';
       const motionSpec = await extractMotionLanguage(url, options);
 
-      // ── Compare mode ───────────────────────────────────────────────
+      // ── Compare mode ───────────────────────────────────────────
       if (opts.compare) {
         spinner.text = `Crawling ${opts.compare}...`;
         console.log(chalk.dim(`  ${opts.compare}`));
@@ -102,7 +113,7 @@ program
         return;
       }
 
-      // ── Normal mode ────────────────────────────────────────────────
+      // ── Normal mode ────────────────────────────────────────────
       spinner.text = 'Writing output files...';
       const health = scoreMotionSpec(motionSpec);
 
@@ -153,7 +164,6 @@ program
       spinner.succeed(chalk.green('Done'));
       console.log('');
 
-      // ── Summary ──
       console.log(chalk.bold('  Fingerprint'));
       console.log(`  Feel:       ${chalk.cyan(motionSpec.fingerprint.feel)}`);
       console.log(`  Pattern:    ${chalk.cyan(motionSpec.fingerprint.dominantPattern || 'none')}`);
@@ -180,6 +190,10 @@ program
       for (const f of written) {
         console.log(`  ${chalk.dim('→')} ${f}`);
       }
+      console.log('');
+
+      // ── MCP usage hint ─────────────────────────────────────────
+      console.log(chalk.dim('  tip: run motionlang mcp --dir ' + outDir + ' to start the AI agent server'));
       console.log('');
 
     } catch (err) {
