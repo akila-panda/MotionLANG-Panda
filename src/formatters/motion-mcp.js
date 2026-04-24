@@ -10,6 +10,7 @@ export function formatMcp(motionSpec) {
     schema: 'motionlang/mcp@1.0',
     source: meta.url,
     timestamp: meta.timestamp,
+    ...(meta.component && { component: { id: meta.component.id, label: meta.component.label, selector: meta.component.selector } }),
 
     // Top-level summary for the LLM context window
     summary: [

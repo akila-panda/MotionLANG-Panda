@@ -17,6 +17,7 @@ export function formatFigma(motionSpec) {
     generator: 'motionlang',
     source: meta.url,
     timestamp: meta.timestamp,
+    ...(meta.component && { component: { id: meta.component.id, label: meta.component.label, selector: meta.component.selector } }),
     fingerprint: {
       feel: fingerprint.feel,
       dominantLibrary: fingerprint.dominantLibrary,

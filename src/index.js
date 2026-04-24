@@ -20,6 +20,7 @@ import { detectCursorFollower } from './detectors/cursor-follower.js';
 import { detectSpotlight } from './detectors/spotlight.js';
 import { computeFingerprint, buildMotionTokens } from './fingerprint.js';
 import { resolveReducedMotion } from './accessibility.js';
+import { segmentPage, attachComponentIds } from './segmenter.js';
 
 function safeDetect(fn, ...args) {
   try { return fn(...args); } catch { return null; }
@@ -57,6 +58,10 @@ export async function extractMotionLanguage(url, options = {}) {
     anim.reducedMotion = resolveReducedMotion(anim, rawData.reducedMotionSupport);
   }
 
+  // ── Component segmentation ────────────────────────────────────────
+  const components = safeDetect(segmentPage, rawData.domStructure) || [];
+  attachComponentIds(animations, components);
+
   // ── Compute motion fingerprint (via extracted module) ─────────────
   const fingerprint = computeFingerprint(animations, detections, rawData);
 
@@ -68,8 +73,10 @@ export async function extractMotionLanguage(url, options = {}) {
       timestamp: new Date().toISOString(),
       elementCount: rawData.elementCount,
       simulationFlags: rawData.simulationFlags,
+      component: options.component || null,
     },
     fingerprint,
+    components,
     animations,
     tokens: buildMotionTokens(animations),
     raw: {

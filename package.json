@@ -1,7 +1,7 @@
 {
   "name": "motionlang",
-  "version": "1.0.0",
-  "description": "Extract the complete motion language from any website — scroll animations, GSAP timelines, Framer Motion variants, transitions, and more. Outputs structured motion spec, GSAP code, Framer Motion code, CSS, Figma tokens, and MCP resource.",
+  "version": "2.0.0",
+  "description": "Extract and reverse-engineer the complete motion language from any website — by component. Detects CSS, GSAP, Framer Motion, AOS, parallax, and cursor animations. Outputs component-scoped specs, GSAP/Framer/CSS code, Figma plugin scripts, HTML preview, site consistency reports, and MCP resources.",
   "type": "module",
   "bin": {
     "motionlang": "./bin/motionlang.js"
@@ -31,7 +31,12 @@
     "playwright",
     "design-system",
     "figma",
-    "mcp"
+    "mcp",
+    "component-extraction",
+    "motion-system",
+    "dtcg",
+    "site-crawler",
+    "reverse-engineering"
   ],
   "author": "",
   "license": "MIT"

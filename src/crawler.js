@@ -745,6 +745,121 @@ export async function crawlPage(url, options = {}) {
       }
     } catch { /* CDP not available or blocked */ }
 
+    // ── DOM structure for component segmentation ───────────────────
+    let domStructure = null;
+    try {
+      domStructure = await page.evaluate(() => {
+        const vh = window.innerHeight;
+
+        // 1. Semantic landmark elements
+        const landmarks = [];
+        for (const tag of ['section', 'article', 'aside', 'nav', 'header', 'footer', 'main']) {
+          for (const el of document.querySelectorAll(tag)) {
+            const rect = el.getBoundingClientRect();
+            const absTop = Math.round(rect.top + window.scrollY);
+            landmarks.push({
+              tag,
+              id: el.id || null,
+              classes: Array.from(el.classList).slice(0, 8).join(' '),
+              role: el.getAttribute('role') || null,
+              ariaLabel: el.getAttribute('aria-label') || null,
+              width: Math.round(rect.width),
+              height: Math.round(rect.height),
+              top: absTop,
+              isViewportSized: rect.height >= vh * 0.8,
+            });
+          }
+        }
+
+        // 2. Headings (h1/h2) as section anchors
+        const headings = [];
+        for (const el of document.querySelectorAll('h1, h2')) {
+          const rect = el.getBoundingClientRect();
+          headings.push({
+            tag: el.tagName.toLowerCase(),
+            text: el.textContent.trim().slice(0, 80),
+            id: el.id || null,
+            classes: Array.from(el.classList).slice(0, 4).join(' '),
+            top: Math.round(rect.top + window.scrollY),
+          });
+        }
+
+        // 3. Named blocks — elements whose class/id matches component keywords
+        const COMPONENT_KEYWORDS = [
+          'hero', 'feature', 'pricing', 'cta', 'card', 'testimonial',
+          'footer', 'nav', 'banner', 'showcase', 'team', 'about',
+          'contact', 'faq', 'gallery', 'services', 'stats', 'clients',
+          'partners', 'learn', 'benefits', 'how-it-works', 'intro',
+        ];
+        const namedBlocks = [];
+        for (const el of document.querySelectorAll('div, section, article')) {
+          const classes = Array.from(el.classList).join(' ').toLowerCase();
+          const id = (el.id || '').toLowerCase();
+          const matched = COMPONENT_KEYWORDS.filter(kw => classes.includes(kw) || id.includes(kw));
+          if (matched.length === 0) continue;
+          const rect = el.getBoundingClientRect();
+          const absTop = Math.round(rect.top + window.scrollY);
+          // Skip deeply-nested duplicates (parent already matched a keyword)
+          const parentEl = el.parentElement;
+          const parentMatches = parentEl
+            ? COMPONENT_KEYWORDS.some(kw =>
+                Array.from(parentEl.classList).join(' ').toLowerCase().includes(kw) ||
+                (parentEl.id || '').toLowerCase().includes(kw))
+            : false;
+          if (parentMatches) continue;
+          namedBlocks.push({
+            tag: el.tagName.toLowerCase(),
+            id: el.id || null,
+            classes: Array.from(el.classList).slice(0, 8).join(' '),
+            matchedKeywords: matched,
+            width: Math.round(rect.width),
+            height: Math.round(rect.height),
+            top: absTop,
+            isViewportSized: rect.height >= vh * 0.8,
+          });
+        }
+
+        // 4. Repeated sibling patterns (3+ similar children = list/grid component)
+        const repeatedPatterns = [];
+        const seen = new Set();
+        for (const parent of document.querySelectorAll('ul, ol, div, section')) {
+          const children = Array.from(parent.children);
+          if (children.length < 3) continue;
+          // Check if majority share a tag or a class prefix
+          const tagCounts = {};
+          for (const child of children) {
+            const tag = child.tagName.toLowerCase();
+            tagCounts[tag] = (tagCounts[tag] || 0) + 1;
+          }
+          const dominantTag = Object.entries(tagCounts).sort((a, b) => b[1] - a[1])[0];
+          if (!dominantTag || dominantTag[1] < 3) continue;
+          const key = `${parent.tagName}:${parent.id}:${parent.className}`;
+          if (seen.has(key)) continue;
+          seen.add(key);
+          const rect = parent.getBoundingClientRect();
+          repeatedPatterns.push({
+            parentTag: parent.tagName.toLowerCase(),
+            parentId: parent.id || null,
+            parentClasses: Array.from(parent.classList).slice(0, 6).join(' '),
+            childTag: dominantTag[0],
+            count: dominantTag[1],
+            top: Math.round(rect.top + window.scrollY),
+            height: Math.round(rect.height),
+          });
+        }
+
+        return {
+          landmarks,
+          headings,
+          namedBlocks,
+          repeatedPatterns: repeatedPatterns.slice(0, 50),
+          viewportHeight: vh,
+          viewportWidth: window.innerWidth,
+          pageHeight: document.body.scrollHeight,
+        };
+      });
+    } catch { /* DOM structure collection failed — segmentation unavailable */ }
+
     return {
       ...rawData,
       gsap: gsapData,
@@ -754,6 +869,7 @@ export async function crawlPage(url, options = {}) {
       cdpAnimations: cdpAnimationsData,
       mouseInteractions: mouseInteractionsData,
       simulationFlags: { scroll, mouse, interactions },
+      domStructure,
     };
 
   } finally {

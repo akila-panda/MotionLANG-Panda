@@ -44,12 +44,21 @@ export function registerResources(server, specDir) {
       throw new Error(`Spec file not found: ${filepath}`);
     }
 
-    return {
-      contents: [{
-        uri,
+    // If this is an MCP spec file and it contains an explanation, expose it
+    let parsed;
+    try { parsed = JSON.parse(content); } catch { parsed = null; }
+
+    const contents = [{ uri, mimeType: 'application/json', text: content }];
+
+    if (parsed?.explanation) {
+      const explainUri = uri + '/explanation';
+      contents.push({
+        uri: explainUri,
         mimeType: 'application/json',
-        text: content,
-      }],
-    };
+        text: JSON.stringify(parsed.explanation, null, 2),
+      });
+    }
+
+    return { contents };
   });
 }

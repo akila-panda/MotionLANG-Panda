@@ -3,6 +3,8 @@
 
 import { bucketDuration } from '../utils/easing-names.js';
 import { figmaDurationTokenName, figmaEasingTokenName } from '../utils/figma-token-schema.js';
+import { formatExplanationMarkdown } from '../explainer.js';
+import { timelineAscii, shouldRenderTimeline } from '../utils/timeline-ascii.js';
 
 export function formatMotionMarkdown(motionSpec) {
   const { meta, fingerprint, animations, tokens } = motionSpec;
@@ -10,6 +12,12 @@ export function formatMotionMarkdown(motionSpec) {
 
   // ── Header ──────────────────────────────────────────────────────
   lines.push(`# Motion Spec: ${meta.title || 'Unknown Site'}`);
+  if (meta.component) {
+    lines.push('');
+    lines.push(`> **Component: ${meta.component.label}**`);
+    lines.push(`> Selector: \`${meta.component.selector}\``);
+    lines.push(`> ${motionSpec.animations.length} animations in this component`);
+  }
   lines.push('');
   lines.push(`> Extracted from \`${meta.url}\``);
   lines.push(`> ${new Date(meta.timestamp).toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' })}`);
@@ -58,6 +66,11 @@ export function formatMotionMarkdown(motionSpec) {
       }
       lines.push('');
     }
+  }
+
+  // ── Explanation (when --explain was used) ────────────────────────
+  if (motionSpec.explanation) {
+    lines.push(formatExplanationMarkdown(motionSpec.explanation));
   }
 
   // ── Animation Inventory ──────────────────────────────────────────
@@ -127,6 +140,16 @@ export function formatMotionMarkdown(motionSpec) {
     lines.push(`Confidence: ${Math.round(example.confidence * 100)}%`);
     lines.push('```');
     lines.push('');
+
+    // ── ASCII timeline for stagger/sequence groups ────────────────
+    if (shouldRenderTimeline(group)) {
+      const dominantEasing = group[0]?.easingName || group[0]?.easing || '';
+      const timeline = timelineAscii(group, { title: `${pattern} — Timing`, easing: dominantEasing });
+      if (timeline) {
+        lines.push(timeline);
+        lines.push('');
+      }
+    }
   }
 
   // ── A11y Summary ─────────────────────────────────────────────────
