@@ -60,7 +60,7 @@ function fromHeadingAnchors(domStructure) {
     const selector = h.id
       ? `#${h.id}`
       : h.classes
-        ? `.${h.classes.split(' ')[0]}`
+        ? `.${toClassString(h.classes).split(' ')[0]}`
         : h.tag;
 
     components.push({
@@ -276,8 +276,10 @@ export function attachComponentIds(animations, components) {
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
 function findComponentForAnimation(anim, components) {
-  // Try element selector match first
-  const selector = anim.element || anim.selector || extractSelector(anim);
+  // Only accept string selectors — anim.element may be an object (e.g. css-transitions)
+  const selector = (typeof anim.element === 'string' ? anim.element : null)
+    || anim.selector
+    || extractSelector(anim);
   if (selector) {
     for (const comp of components) {
       if (comp.selector && selectorOverlaps(selector, comp.selector)) {
@@ -298,17 +300,26 @@ function findComponentForAnimation(anim, components) {
 }
 
 function extractSelector(anim) {
+  // Handle object-shaped element (e.g. { tag, id, classes } from css-transitions)
+  const el = anim.element;
+  if (el && typeof el === 'object') {
+    if (el.id)      return `#${el.id}`;
+    if (el.classes) return `.${toClassString(el.classes).split(' ')[0]}`;
+    if (el.tag)     return el.tag;
+  }
+
   if (anim.targets && anim.targets.length > 0) {
     const t = anim.targets[0];
-    if (t.id) return `#${t.id}`;
-    if (t.classes) return `.${t.classes.split(' ')[0]}`;
+    if (t.id)      return `#${t.id}`;
+    if (t.classes) return `.${toClassString(t.classes).split(' ')[0]}`;
   }
   if (anim.keyframe?.name) return `[data-keyframe="${anim.keyframe.name}"]`;
   return null;
 }
 
 function selectorOverlaps(animSelector, compSelector) {
-  // Simple string-based check: does the animation selector relate to the component?
+  // Guard: both must be strings — defensive check against unexpected types
+  if (typeof animSelector !== 'string' || typeof compSelector !== 'string') return false;
   const a = animSelector.toLowerCase();
   const c = compSelector.toLowerCase().replace(/[#.]/g, '');
   return a.includes(c) || c.includes(a.replace(/[#.]/g, ''));
@@ -331,10 +342,10 @@ function labelFromElement(el) {
   if (el.ariaLabel) return titleCase(el.ariaLabel);
   if (el.id) return titleCase(el.id.replace(/[-_]/g, ' '));
 
-  const kw = componentKeywordFromClasses(el.classes || '', el.id || '');
+  const kw = componentKeywordFromClasses(toClassString(el.classes), el.id || '');
   if (kw) return titleCase(kw);
 
-  const firstClass = (el.classes || '').split(' ').find(c => c.length > 2);
+  const firstClass = toClassString(el.classes).split(' ').find(c => c.length > 2);
   if (firstClass) return titleCase(firstClass.replace(/[-_]/g, ' '));
 
   return titleCase(el.tag || 'section');
@@ -342,9 +353,20 @@ function labelFromElement(el) {
 
 function selectorFor(el) {
   if (el.id) return `#${el.id}`;
-  const firstClass = (el.classes || '').split(' ').find(c => c.length > 2);
+  const firstClass = toClassString(el.classes).split(' ').find(c => c.length > 2);
   if (firstClass) return `${el.tag || 'div'}.${firstClass}`;
   return el.tag || 'section';
+}
+
+// Safely coerce a classes value to a plain string.
+// SVG elements expose className as SVGAnimatedString {baseVal, animVal};
+// other detectors may pass arrays or null. Always returns a string.
+function toClassString(classes) {
+  if (!classes) return '';
+  if (typeof classes === 'string') return classes;
+  if (Array.isArray(classes)) return classes.join(' ');
+  if (typeof classes === 'object') return classes.baseVal ?? classes.animVal ?? '';
+  return String(classes);
 }
 
 function titleCase(str) {

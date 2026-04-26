@@ -335,7 +335,6 @@ program
       }
 
       // ── Resolve --component: accept number or id string ────────
-      let resolvedComponent = null;
       if (opts.component) {
         const { components = [] } = motionSpec;
         const input = opts.component.trim();
@@ -353,7 +352,6 @@ program
         }
 
         if (resolved) {
-          resolvedComponent = resolved;
           // Scope the motionSpec to this component's animations only
           motionSpec.animations = motionSpec.animations.filter(a => a.componentId === resolved.id);
           motionSpec.meta.component = resolved;
@@ -416,10 +414,11 @@ program
         }
 
         // Write output files
-        const hostname = new URL(url).hostname.replace(/\./g, '-');
-        const outDir = join(opts.out, hostname, 'site-crawl');
+        const outDir = opts.out;
         mkdirSync(outDir, { recursive: true });
-        const prefix = hostname;
+        const hostname = new URL(url).hostname.replace(/\./g, '-');
+        const timestamp = new Date().toISOString().slice(0, 10);
+        const prefix = `${hostname}-${timestamp}`;
 
         const reportJsonPath = join(outDir, `${prefix}-site-consistency-report.json`);
         const reportMdPath   = join(outDir, `${prefix}-site-consistency-report.md`);
@@ -483,11 +482,12 @@ program
           console.log('');
         }
 
+        const outDir = opts.out;
+        mkdirSync(outDir, { recursive: true });
         const hostnameA = new URL(url).hostname.replace(/\./g, '-');
         const hostnameB = new URL(opts.compare).hostname.replace(/\./g, '-');
-        const outDir = join(opts.out, hostnameA, 'compare');
-        mkdirSync(outDir, { recursive: true });
-        const comparePath = join(outDir, `${hostnameA}-vs-${hostnameB}-compare.json`);
+        const timestamp = new Date().toISOString().slice(0, 10);
+        const comparePath = join(outDir, `${hostnameA}-vs-${hostnameB}-${timestamp}-compare.json`);
         writeFileSync(comparePath, JSON.stringify(diff, null, 2));
         console.log(chalk.bold('  Output files'));
         console.log(`  ${chalk.dim('→')} ${comparePath}`);
@@ -513,26 +513,11 @@ program
         motionSpec.fixes = fixResult; // attach to spec so JSON includes it
       }
 
-      const hostname = new URL(url).hostname.replace(/\./g, '-');
-
-      // ── Build organised output dir: <root>/<domain>/<component|full> ──
-      let componentSlug;
-      if (resolvedComponent) {
-        const num        = opts.component.trim();
-        const labelSlug  = resolvedComponent.label
-          .toLowerCase()
-          .replace(/[^a-z0-9]+/g, '-')   // non-alphanumeric → hyphen
-          .replace(/^-+|-+$/g, '')        // trim leading/trailing hyphens
-          .slice(0, 40);                  // keep filenames sane
-        componentSlug = `c${num}-${labelSlug}`;
-      } else {
-        componentSlug = 'full';
-      }
-
-      const outDir = join(opts.out, hostname, componentSlug);
+      const outDir = opts.out;
       mkdirSync(outDir, { recursive: true });
-
-      const prefix = `${hostname}-${componentSlug}`;
+      const hostname = new URL(url).hostname.replace(/\./g, '-');
+      const timestamp = new Date().toISOString().slice(0, 10);
+      const prefix = `${hostname}-${timestamp}`;
       const written = [];
       const emit = opts.emit;
 

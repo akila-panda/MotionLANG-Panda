@@ -118,7 +118,7 @@ export async function crawlPage(url, options = {}) {
         const b = before[i], a = after[i];
         if (b.transform !== a.transform || b.background !== a.background) {
           changed.push({
-            element: `${a.tag}${a.id ? '#' + a.id : ''}${a.classes ? '.' + a.classes.split(' ')[0] : ''}`,
+            element: `${a.tag}${a.id ? '#' + a.id : ''}${a.classes ? '.' + (typeof a.classes === 'string' ? a.classes : (a.classes.baseVal ?? '')).split(' ')[0] : ''}`,
             transformBefore: b.transform,
             transformAfter:  a.transform,
             backgroundChanged: b.background !== a.background,
@@ -406,7 +406,10 @@ export async function crawlPage(url, options = {}) {
               targets: child.targets?.().map(t => ({
                 tag: t?.tagName?.toLowerCase?.() || null,
                 id: t?.id || null,
-                classes: t?.className || null,
+                // SVG elements expose className as SVGAnimatedString {baseVal,animVal} not a plain string
+                classes: (typeof t?.className === 'string'
+                  ? t.className
+                  : t?.className?.baseVal ?? null) || null,
               })) || [],
               duration: child.duration?.() ?? null,
               delay: child.delay?.() ?? null,
@@ -872,6 +875,188 @@ export async function crawlPage(url, options = {}) {
       domStructure,
     };
 
+  } finally {
+    await browser.close();
+  }
+}
+// ── Component Snapshot ────────────────────────────────────────────────────
+// Captures the live DOM + inlined computed styles for a specific selector.
+// Used by the --component-preview formatter to reconstruct the real component.
+
+export async function captureComponentSnapshot(url, selector, options = {}) {
+  const {
+    width = 1280, height = 800, wait = 0,
+    executablePath, cookies, headers, insecure = false, userAgent,
+  } = options;
+
+  const browser = await chromium.launch({
+    headless: true,
+    ...(executablePath && { executablePath }),
+    args: ['--disable-dev-shm-usage'],
+  });
+
+  try {
+    const context = await browser.newContext({
+      viewport: { width, height },
+      ignoreHTTPSErrors: insecure,
+      ...(userAgent && { userAgent }),
+      ...(headers && { extraHTTPHeaders: headers }),
+    });
+
+    if (cookies?.length > 0) {
+      await context.addCookies(cookies);
+    }
+
+    const page = await context.newPage();
+    await gotoWithRetry(page, url, { waitUntil: 'networkidle', timeout: 30000 });
+    await page.evaluate(() => document.fonts.ready).catch(() => {});
+
+    if (wait > 0) {
+      await page.waitForTimeout(wait);
+    }
+
+    // Scroll the page so lazy-loaded content and scroll-triggered styles settle
+    await page.evaluate(async () => {
+      await new Promise(resolve => {
+        let total = 0;
+        const step = 300;
+        const timer = setInterval(() => {
+          window.scrollBy(0, step);
+          total += step;
+          if (total >= document.body.scrollHeight) {
+            window.scrollTo(0, 0);
+            clearInterval(timer);
+            resolve();
+          }
+        }, 50);
+      });
+    }).catch(() => {});
+
+    await page.waitForTimeout(400);
+
+    const snapshot = await page.evaluate((sel) => {
+      const el = document.querySelector(sel);
+      if (!el) return null;
+
+      // ── Inline computed styles on every element in the subtree ──
+      function inlineStyles(node) {
+        if (node.nodeType !== 1) return;
+        const cs = window.getComputedStyle(node);
+
+        // Key visual properties to inline (avoids inlining every property which
+        // would bloat the HTML and override the GSAP animation properties)
+        const props = [
+          'display', 'position', 'top', 'left', 'right', 'bottom',
+          'width', 'height', 'min-width', 'max-width', 'min-height', 'max-height',
+          'margin', 'margin-top', 'margin-right', 'margin-bottom', 'margin-left',
+          'padding', 'padding-top', 'padding-right', 'padding-bottom', 'padding-left',
+          'flex', 'flex-direction', 'flex-wrap', 'align-items', 'justify-content',
+          'gap', 'grid-template-columns', 'grid-template-rows', 'grid-gap',
+          'font-family', 'font-size', 'font-weight', 'font-style', 'line-height',
+          'letter-spacing', 'text-align', 'text-transform', 'text-decoration',
+          'color', 'background-color', 'background-image', 'background-size',
+          'background-position', 'background-repeat',
+          'border', 'border-radius', 'border-color', 'border-width', 'border-style',
+          'box-sizing', 'overflow', 'z-index', 'list-style',
+          'white-space', 'word-break', 'text-overflow',
+          'clip-path', 'object-fit', 'object-position',
+          'pointer-events', 'cursor', 'user-select',
+        ];
+
+        const inlined = props
+          .map(p => `${p}:${cs.getPropertyValue(p)}`)
+          .filter(s => !s.endsWith(':') && !s.endsWith(':none') && !s.endsWith(':normal') && !s.endsWith(':auto') && !s.endsWith(':0px') && !s.endsWith(':initial') && !s.endsWith(':unset'))
+          .join(';');
+
+        // Preserve any existing inline style, append computed
+        const existing = node.getAttribute('style') || '';
+        node.setAttribute('style', existing ? `${existing};${inlined}` : inlined);
+
+        // Reset animation/transition so GSAP takes full control
+        node.style.animation = 'none';
+        node.style.transition = 'none';
+
+        for (const child of node.children) {
+          inlineStyles(child);
+        }
+      }
+
+      // Clone so we don't mutate the live DOM
+      const clone = el.cloneNode(true);
+
+      // Inline styles on original (to read computed), then copy to clone
+      function inlineToClone(original, cloned) {
+        if (original.nodeType !== 1) return;
+        const cs = window.getComputedStyle(original);
+        const props = [
+          'display', 'position',
+          'width', 'height', 'min-width', 'max-width', 'min-height',
+          'margin', 'margin-top', 'margin-right', 'margin-bottom', 'margin-left',
+          'padding', 'padding-top', 'padding-right', 'padding-bottom', 'padding-left',
+          'flex', 'flex-direction', 'flex-wrap', 'align-items', 'justify-content',
+          'gap', 'grid-template-columns',
+          'font-family', 'font-size', 'font-weight', 'line-height',
+          'letter-spacing', 'text-align', 'text-transform',
+          'color', 'background-color',
+          'border', 'border-radius',
+          'box-sizing', 'overflow', 'list-style',
+          'white-space', 'word-break',
+          'object-fit', 'pointer-events',
+        ];
+        const css = props
+          .map(p => { const v = cs.getPropertyValue(p); return v ? `${p}:${v}` : null; })
+          .filter(Boolean)
+          .join(';');
+        cloned.setAttribute('style', css);
+        cloned.style.animation = '';
+        cloned.style.transition = '';
+        cloned.style.opacity = '';
+        cloned.style.transform = '';
+        const origChildren = Array.from(original.children);
+        const cloneChildren = Array.from(cloned.children);
+        for (let i = 0; i < origChildren.length && i < cloneChildren.length; i++) {
+          inlineToClone(origChildren[i], cloneChildren[i]);
+        }
+      }
+
+      inlineToClone(el, clone);
+
+      const bodyCs = window.getComputedStyle(document.body);
+      const rootCs = window.getComputedStyle(document.documentElement);
+
+      // Collect :root CSS custom properties (color/spacing tokens)
+      const cssVars = {};
+      try {
+        for (const sheet of document.styleSheets) {
+          try {
+            for (const rule of sheet.cssRules) {
+              if (rule.selectorText === ':root' || rule.selectorText === 'html') {
+                const text = rule.cssText;
+                const matches = text.matchAll(/--([\w-]+)\s*:\s*([^;]+)/g);
+                for (const m of matches) {
+                  cssVars[`--${m[1]}`] = m[2].trim();
+                }
+              }
+            }
+          } catch { /* cross-origin sheet */ }
+        }
+      } catch { /* */ }
+
+      return {
+        html:         clone.outerHTML,
+        selector:     sel,
+        tagName:      el.tagName.toLowerCase(),
+        pageUrl:      window.location.href,
+        pageBg:       bodyCs.backgroundColor || '#ffffff',
+        pageColor:    bodyCs.color || '#000000',
+        pageFontFamily: bodyCs.fontFamily,
+        elWidth:      Math.round(el.getBoundingClientRect().width),
+        elHeight:     Math.round(el.getBoundingClientRect().height),
+        cssVars,
+      };
+    }, selector);
+
+    return snapshot;
   } finally {
     await browser.close();
   }
